@@ -1,0 +1,182 @@
+# À placer dans : .github/workflows/ci-cd.yml
+#
+# Critères du quality gate
+#   BLOQUANTS : smoke tests (@smoke) à 100 %, taux de réussite global >= 95 %
+#   ALERTES   : tests flaky > 2 %, durée > +20 % vs moyenne, >= 2 échecs sur les 5 derniers runs
+#
+# Prérequis : taguer vos tests critiques avec @smoke dans leur titre, par exemple
+#   test('connexion utilisateur @smoke', async ({ page }) => { ... });
+
+name: CI-CD avec quality gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read   # nécessaire pour lire l'historique des runs
+
+env:
+  WORKFLOW_FILE: ci-cd.yml
+
+jobs:
+  # ---------------------------------------------------------------
+  # 1. Smoke tests : 100 % obligatoire
+  # ---------------------------------------------------------------
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps
+      - name: Smoke tests
+        run: npx playwright test --grep @smoke
+
+  # ---------------------------------------------------------------
+  # 2. Suite complète : on produit les rapports, le gate décidera
+  # ---------------------------------------------------------------
+  test:
+    needs: smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps
+      - name: Suite complète (le résultat est jugé par le gate)
+        continue-on-error: true
+        env:
+          PLAYWRIGHT_JSON_OUTPUT_NAME: results.json
+        run: npx playwright test --reporter=json,html --retries=1
+      - name: Publier les rapports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rapports-tests
+          path: |
+            results.json
+            playwright-report/
+          retention-days: 30
+
+  # ---------------------------------------------------------------
+  # 3. Quality gate : applique les seuils
+  # ---------------------------------------------------------------
+  quality-gate:
+    needs: test
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: actions/download-artifact@v4
+        with:
+          name: rapports-tests
+      - name: Évaluer les critères
+        run: |
+          cat > gate.js <<'EOF'
+          const fs = require('fs');
+          const { execSync } = require('child_process');
+
+          // ---- Seuils (à ajuster selon votre historique) ----
+          const SEUIL = {
+            tauxReussite: 95,    // % minimum (BLOQUANT)
+            tauxFlaky: 2,        // % maximum (alerte)
+            deriveDuree: 20,     // % maximum vs moyenne (alerte)
+            echecsRecents: 2     // nb max d'échecs sur les 5 derniers runs (alerte)
+          };
+
+          const bloquants = [];
+          const alertes = [];
+          const lignes = [];
+
+          // ---- Résultats de la suite ----
+          const s = JSON.parse(fs.readFileSync('results.json', 'utf8')).stats;
+          const total = s.expected + s.unexpected + s.flaky;
+          if (total === 0) {
+            bloquants.push('Aucun test exécuté');
+          } else {
+            const tauxReussite = ((s.expected + s.flaky) / total) * 100;
+            const tauxFlaky = (s.flaky / total) * 100;
+            lignes.push(`| Taux de réussite | ${tauxReussite.toFixed(1)} % | >= ${SEUIL.tauxReussite} % | Bloquant |`);
+            lignes.push(`| Tests flaky | ${tauxFlaky.toFixed(1)} % (${s.flaky}) | <= ${SEUIL.tauxFlaky} % | Alerte |`);
+            if (tauxReussite < SEUIL.tauxReussite)
+              bloquants.push(`Taux de réussite ${tauxReussite.toFixed(1)} % < ${SEUIL.tauxReussite} %`);
+            if (tauxFlaky > SEUIL.tauxFlaky)
+              alertes.push(`Tests flaky : ${tauxFlaky.toFixed(1)} % > ${SEUIL.tauxFlaky} %`);
+          }
+
+          // ---- Historique (durée et tendance) ----
+          try {
+            const repo = process.env.GITHUB_REPOSITORY;
+            const wf = process.env.WORKFLOW_FILE;
+            const runId = Number(process.env.GITHUB_RUN_ID);
+            const api = (p) => JSON.parse(execSync(`gh api "${p}"`, { encoding: 'utf8' }));
+
+            const hist = api(`repos/${repo}/actions/workflows/${wf}/runs?branch=main&status=completed&per_page=10`)
+              .workflow_runs.filter(r => r.id !== runId);
+
+            // Durée : le run courant n'est pas terminé, on mesure le temps écoulé (approximation)
+            const courant = api(`repos/${repo}/actions/runs/${runId}`);
+            const dureeCourante = (Date.now() - new Date(courant.run_started_at)) / 1000;
+            const durees = hist.map(r => (new Date(r.updated_at) - new Date(r.run_started_at)) / 1000);
+            if (durees.length >= 3) {
+              const moyenne = durees.reduce((a, b) => a + b, 0) / durees.length;
+              const derive = ((dureeCourante - moyenne) / moyenne) * 100;
+              lignes.push(`| Durée du run | ${dureeCourante.toFixed(0)} s (moy. ${moyenne.toFixed(0)} s, ${derive >= 0 ? '+' : ''}${derive.toFixed(0)} %) | <= +${SEUIL.deriveDuree} % | Alerte |`);
+              if (derive > SEUIL.deriveDuree)
+                alertes.push(`Durée en hausse de ${derive.toFixed(0)} % vs moyenne`);
+            }
+
+            // Tendance : échecs sur les 5 derniers runs
+            const cinq = hist.slice(0, 5);
+            if (cinq.length > 0) {
+              const echecs = cinq.filter(r => r.conclusion === 'failure').length;
+              lignes.push(`| Échecs sur les ${cinq.length} derniers runs | ${echecs} | <= ${SEUIL.echecsRecents} | Alerte |`);
+              if (echecs >= SEUIL.echecsRecents)
+                alertes.push(`${echecs} échecs sur les ${cinq.length} derniers runs`);
+            }
+          } catch (e) {
+            alertes.push('Historique indisponible (durée et tendance non évaluées)');
+          }
+
+          // ---- Rapport ----
+          let md = '## Quality gate\n\n| Critère | Valeur | Seuil | Type |\n|---|---|---|---|\n' + lignes.join('\n') + '\n\n';
+          md += bloquants.length ? '**Déploiement BLOQUÉ**\n' + bloquants.map(b => `- ${b}`).join('\n') + '\n'
+                                 : '**Critères bloquants OK : déploiement autorisé**\n';
+          if (alertes.length) md += '\nAlertes (non bloquantes) :\n' + alertes.map(a => `- ${a}`).join('\n') + '\n';
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, md);
+          console.log(md);
+
+          alertes.forEach(a => console.log(`::warning::${a}`));
+          if (bloquants.length) {
+            bloquants.forEach(b => console.log(`::error::${b}`));
+            process.exit(1);
+          }
+          EOF
+          node gate.js
+
+  # ---------------------------------------------------------------
+  # 4. Déploiement : uniquement si le gate est vert, sur main
+  # ---------------------------------------------------------------
+  deploy:
+    needs: quality-gate
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment: production   # activez "Required reviewers" dans Settings > Environments
+    steps:
+      - uses: actions/checkout@v4
+      - name: Déploiement
+        run: echo "Déploiement en production..."   # remplacez par votre vraie commande
