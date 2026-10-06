@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>Liste de courses</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 480px; margin: 40px auto; padding: 0 16px; }
+  label { display: block; margin-top: 8px; }
+  input, button { font: inherit; padding: 6px 10px; margin: 4px 0; }
+  li { display: flex; justify-content: space-between; align-items: center; padding: 4px 0; }
+  #empty { color: #666; }
+</style>
+</head>
+<body>
+  <h1>Liste de courses</h1>
+
+  <label for="article">Nouvel article</label>
+  <input id="article">
+  <button id="add">Ajouter</button>
+
+  <p id="count" role="status">0 article</p>
+  <p id="empty">Votre liste est vide</p>
+  <ul id="list"></ul>
+
+<script>
+  const $ = s => document.querySelector(s);
+  let articles = [];
+
+  function render() {
+    $('#list').innerHTML = '';
+    articles.forEach((nom, i) => {
+      const li = document.createElement('li');
+      const span = document.createElement('span');
+      span.textContent = nom;
+      const btn = document.createElement('button');
+      btn.textContent = '✕';
+      btn.setAttribute('aria-label', `Supprimer ${nom}`);
+      btn.addEventListener('click', () => { articles.splice(i, 1); render(); });
+      li.append(span, btn);
+      $('#list').append(li);
+    });
+    const n = articles.length;
+    $('#count').textContent = `${n} article${n > 1 ? 's' : ''}`;
+    $('#empty').hidden = n > 0;
+  }
+
+  $('#add').addEventListener('click', () => {
+    const nom = $('#article').value.trim();
+    if (!nom) return;
+    articles.push(nom);
+    $('#article').value = '';
+    render();
+  });
+
+  render();
+</script>
+</body>
+</html>

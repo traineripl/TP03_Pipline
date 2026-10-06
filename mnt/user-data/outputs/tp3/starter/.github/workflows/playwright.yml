@@ -1,0 +1,32 @@
+# TP3 — Pipeline CI : à compléter.
+# Remplacez chaque ____ par la bonne valeur, puis supprimez les commentaires d'aide si vous le souhaitez.
+
+name: ____                       # nom affiché dans l'onglet Actions
+
+on:
+  ____:                          # quel événement GitHub doit déclencher ce workflow ?
+
+jobs:
+  test:
+    runs-on: ____                # système du runner (indice : ubuntu-latest)
+    timeout-minutes: 15
+    steps:
+      - uses: actions/____@v4    # 1) récupérer le code du dépôt
+
+      - uses: actions/____@v4    # 2) installer Node.js
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: ____                # 3) installer les dépendances à partir de package-lock.json
+
+      - run: ____                # 4) installer les navigateurs Playwright avec leurs dépendances système
+
+      - run: ____                # 5) lancer la suite de tests
+
+      - uses: actions/upload-artifact@v4
+        if: ____                 # 6) envoyer le rapport même si les tests ont échoué
+        with:
+          name: playwright-report
+          path: ____             # dossier produit par le rapport HTML
+          retention-days: 14
